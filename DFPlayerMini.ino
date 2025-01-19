@@ -1,28 +1,28 @@
 #include "SoftwareSerial.h"
-#define Start_Byte        0x7E
-#define Version_Byte      0xFF
-#define Command_Length    0x06
-#define End_Byte          0xEF
+#include "DFPlayer_commands.h"
 
-//  Returns info with command 0x41 [0x01: info, 0x00: no info]
-#define Acknowledge       0x01
-
-SoftwareSerial mySerial(6, 7);  //  RX, TX
+SoftwareSerial mySerial(6, 7);  //  RX, TX on Uno when follwing the free AZDelivery eBook
+// SoftwareSerial mySerial(51, 53);  //  RX, TX on Mega2560 when using it on the Elegoo Smart Robot Car Kit V4.0
 byte receive_buffer[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 char data;
 byte volume = 0x00;
 bool mute_state = false;
 
-void execute_CMD(byte CMD, byte Par1, byte Par2) {
-  //  Sends the command to the module
+/**
+ * Sends the command to the module.
+ * @param CMD The command byte according to specification. You may want to use the defines from DFPlayer_commands.h.
+ * @param DATA1 The first data byte.
+ * @param DATA2 The second data byte.
+ */
+void execute_CMD(byte CMD, byte DATA1 = 0x00, byte DATA2 = 0x00) {
   
   //  Calculate the checksum (2 bytes)
-  word checksum = -(Version_Byte + Command_Length + CMD + Acknowledge + Par1 + Par2);
+  word checksum = -(Version_Byte + Command_Length + CMD + Acknowledge + DATA1 + DATA2);
   
   //  Build the command line
   byte Command_line[10] = { Start_Byte, Version_Byte,
                             Command_Length, CMD, Acknowledge, 
-                            Par1, Par2, highByte(checksum),
+                            DATA1, DATA2, highByte(checksum),
                             lowByte(checksum), End_Byte};
 
   //  Send the command line to the module
@@ -31,15 +31,19 @@ void execute_CMD(byte CMD, byte Par1, byte Par2) {
   }
 }
 
+/**
+ * Resets the receive_buffer.
+ */
 void reset_rec_buf() {
-  // Resets the receive_buffer
   for(uint8_t i = 0; i < 10; i++) {
     receive_buffer[i] = 0;
   }
 }
 
+/**
+ * Reads the received data.
+ */
 bool receive() {
-  // Reads the received data
   reset_rec_buf();
   if(mySerial.available() < 10) {
     return false;
@@ -67,403 +71,388 @@ bool receive() {
   return true;
 }
 
-void print_received(bool print_it) {
+/**
+ * Attempts to receive serial data from the module. Skips the Acknowledge responses until expected command response or nothing is received.
+ * The function also calls necessary delays with the default values or provided values.
+ *
+ * This function is the fence for print_essential_receive_buffer!
+ *
+ * @param commandLabel A string describing the command. If empty, only receive() is called.
+ * @param expectedCommand One of the Command_* defines in DFPlayer_commands.h. The function looks for a response with that command in the CMD field.
+ * @param firstDelay The delay which is called immediately when the function is called. The default is usually fine, but after chip reset you should set 1000.
+ * @param furtherDelays The delays that are called before the function returns. They ensure that following commands can receive responses. In rare cases you may need to tweak that default.
+ * @return false if the receive_buffer should not be printed because no commandLabel was provided, no data was received or the expected command response was not received, 
+ */
+bool smart_receive(const String &commandLabel = "", byte expectCommand = 0, unsigned long firstDelay = 100, unsigned long furtherDelays = 100) {
+  delay(firstDelay);
+
+  if (commandLabel == "") {
+    receive();
+    delay(furtherDelays);
+    return false;
+  }
+
+  uint8_t skippedResponses = 0;
+  uint8_t hasReceivedCommandResponse = 0;
+  for (uint8_t i = 0; i < 10; i++) {
+    if (!receive()) {
+      Serial.println(commandLabel + "\t" + "recieved nothing");
+      delay(furtherDelays);
+      return false;
+    }
+    // break from for if response is not Acknowledge and matches expectCommand
+    bool isExpectedCommand = (expectCommand != 0 && receive_buffer[Command_Index] == expectCommand) || expectCommand == 0;
+    if (receive_buffer[Command_Index] != Command_Successfully_Executed && isExpectedCommand) {
+      hasReceivedCommandResponse = 1;
+      if (skippedResponses == 0) {
+        Serial.println("recieved something that is not Acknowledge or the expected command");
+      }
+      break;
+    }
+    skippedResponses++;
+    delay(furtherDelays);
+  }
+  if (hasReceivedCommandResponse == 0) {
+    Serial.println("recieved nothing at all in 10 retries");
+    delay(furtherDelays);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * If commandLabel is provided it will print received CMD DATA1 DATA2 bytes in HEX.
+ * The function also calls necessary delays with the default values or provided values.
+ *
+ * Must only be called fenced by smart_receive()!
+ *
+ * @param commandLabel A string describing the command. It will be printed in the first column before the TAB.
+ * @param furtherDelays The delays that are called before the function returns. They ensure that following commands can receive responses. In rare cases you may need to tweak that default.
+ */
+void print_essential_receive_buffer(const String &commandLabel = "", unsigned long furtherDelays = 100) {
+  if (commandLabel == "") {
+    return false;
+  }
+
+  Serial.print(commandLabel + "\t");
   // Outputs the returend data from the module
   // To the Serial Monitor
-  if(print_it) {
-    if(receive()) {
-      for(uint8_t i = 0; i < 10; i++) {
-        Serial.print(receive_buffer[i], HEX);
-        Serial.print("\t");
-      }
-      Serial.println();
-    }
+  for(uint8_t i = 3; i < 7; i++) { // only loop from Command index to data bytes
+    if (i == 4) continue; // skip Acknowledge byte
+    Serial.print(receive_buffer[i], HEX);
+    Serial.print("\t");
   }
-  else {
-    receive();
+  Serial.println();
+  delay(furtherDelays);
+}
+
+/**
+ * Attempts to receive serial data from the module. If commandLabel is provided it will print received CMD DATA1 DATA2 bytes in HEX. Skips the Acknowledge responses until expected command response or nothing is received.
+ * The function also calls necessary delays with the default values or provided values.
+ *
+ * @param commandLabel A string describing the command. It will be printed in the first column before the TAB.
+ * @param expectedCommand One of the Command_* defines in DFPlayer_commands.h. The function looks for a response with that command in the CMD field.
+ * @param firstDelay The delay which is called immediately when the function is called. The default is usually fine, but after chip reset you should set 1000.
+ * @param furtherDelays The delays that are called before the function returns. They ensure that following commands can receive responses. In rare cases you may need to tweak that default.
+ */
+void smart_receive_and_print(const String &commandLabel = "", byte expectCommand = 0, unsigned long firstDelay = 100, unsigned long furtherDelays = 100) {
+  if (smart_receive(commandLabel, expectCommand, firstDelay, furtherDelays)) {
+    print_essential_receive_buffer(commandLabel, furtherDelays);
   }
 }
 
+/**
+ * Resets the module and sets the EQ state, volume level, and starts the key input loop.
+ */
 void module_init() {
-  // Resets the module and sets the EQ state, 
-  // volume level, and plays first song on the
-  // storage device
-  execute_CMD(0x0C, 0, 0); // reset the module
-  delay(1000);
-  print_received(false);
-  delay(100);
-  Serial.print("SDON\t");
-  print_received(true);
-  delay(100);
-  set_eq(2);
-  play_first();
-  set_volume(0x09);
+  reset_chip();
+  set_eq(Equalizer_Preset::Classic);
+  set_volume(Volume_Preset::dB_010_Quiet_Forest);
+  loop();
 }
 
-void set_eq(uint8_t eq) {
-  // Sets the state of EQ
-  Serial.print("SETEQ\t");
-  execute_CMD(0x07, 0, eq); // Sets the EQ
-  delay(100);  
-  print_received(false);
-  delay(100);
-  execute_CMD(0x44, 0, 0);  // Get EQ state
-  delay(100);
-  print_received(false);
-  delay(100);
-  print_received(true);
-  delay(100);
+/**
+ * Resets the DFPlayer mini master module.
+ */
+void reset_chip() {
+  execute_CMD(Command_Reset_Chip); // reset the module
+  smart_receive_and_print("SDON", Command_Current_Storage_Device, 1000);
 }
 
-void play_first() {
-  // Plays first song on the storage device
-  Serial.print("PLYFST\t");
-  execute_CMD(0x03, 0, 1); // Play first song
-  delay(100);
-  print_received(false);
-  delay(100);
-  execute_CMD(0x45, 0, 0); // Get playback status
-  delay(100);
-  print_received(false);
-  delay(100);
-  print_received(true);
-  delay(100);
+/**
+ * Sets the state of EQ.
+ * @param eq An Equalizer_Preset enum literal.
+ */
+void set_eq(Equalizer_Preset eq) {
+  execute_CMD(Command_Set_Equalizer, 0, eq); // Sets the EQ
+  smart_receive_and_print();
+
+  execute_CMD(Command_Get_Equalizer_Status);  // Get EQ state
+  smart_receive_and_print("SETEQ", Command_Get_Equalizer_Status);
 }
 
+/**
+ * Sets the volume level.
+ * @param volume Decibels as HEX byte. You may want to use one of the presents defined in Volume_Preset enum literal.
+ */
 void set_volume(uint8_t volume) {
-  // Sets the volume level
-  Serial.print("SETVOL\t");
-  execute_CMD(0x06, 0, volume); //  Set volume level
-  delay(100);
-  print_received(false);
-  delay(100);
-  execute_CMD(0x43, 0, 0);  //  Get volume level
-  delay(100);
-  print_received(false);
-  delay(100);
-  print_received(true);
-  delay(100);
+  execute_CMD(Command_Set_Volume, 0, volume); //  Set volume level
+  smart_receive_and_print();
+
+  execute_CMD(Command_Get_Volume_Status);  //  Get volume level
+  smart_receive_and_print("SETVOL", Command_Get_Volume_Status);
 }
 
-void play() {
-  // Resumes playing current song
-  Serial.print("PLAY\t");
-  execute_CMD(0x0D, 0, 0); 
-  delay(100);
-  print_received(false);
-  delay(100);
-  execute_CMD(0x4C, 0, 0); // Get the current song played
-  delay(100);
-  print_received(false);
-  delay(100);
-  print_received(true);
-  delay(100);
+/**
+ * Plays first file on the storage device.
+ */
+void play_first() {
+  execute_CMD(Command_Play_With_Index, 0, 1); // Play first file
+  smart_receive_and_print();
+
+  execute_CMD(Command_Get_Playback_Status); // Get playback status
+  smart_receive_and_print("PLYFST", Command_Get_Playback_Status, 200, 200);
 }
 
+/**
+ * Resumes playing current file.
+ */
+void resume() {
+  execute_CMD(Command_Resume);
+  smart_receive_and_print();
+
+  execute_CMD(Command_Get_Current_File_Number);  // Get the current file played
+  smart_receive_and_print("RESUME", Command_Get_Current_File_Number);
+}
+
+/**
+ * Pauses only current file.
+ */
 void pause() {
-  // Pauses only current song
-  Serial.print("PAUSE\t");
-  execute_CMD(0x0E, 0, 0);
-  delay(100);
-  print_received(false);
-  delay(100);
-  execute_CMD(0x4C, 0, 0); // Get the current song played
-  delay(100);
-  print_received(false);
-  delay(100);
-  print_received(true);
-  delay(100);
+  execute_CMD(Command_Pause);
+  smart_receive_and_print();
+
+  execute_CMD(Command_Get_Current_File_Number);  // Get the current file played
+  smart_receive_and_print("PAUSE", Command_Get_Current_File_Number);
 }
 
+/**
+ * Plays next file, after which it stops playback.
+ */
 void play_next() {
-  // Plays next song, after which it stops playback
-  Serial.print("NEXT\t");
-  execute_CMD(0x01, 0, 0);
-  delay(100);
-  print_received(false);
-  delay(100);
-  execute_CMD(0x4C, 0, 0); // Get the current song played
-  delay(100);
-  print_received(false);
-  delay(100);
-  print_received(true);
-  delay(100);
+  execute_CMD(Command_Play_Next_File);
+  smart_receive_and_print();
+
+  execute_CMD(Command_Get_Current_File_Number); // Get the current file played
+  smart_receive_and_print("NEXT", Command_Get_Current_File_Number);
 }
 
+/**
+ * Plays previous file, after which it stops playback.
+ */
 void play_previous() {
-  // Plays previous song, after which it stops playback
-  Serial.print("PRE\t");
-  execute_CMD(0x02, 0, 0);
-  delay(100);
-  print_received(false);
-  delay(100);
-  execute_CMD(0x4C, 0, 0); // Get the current song played
-  delay(100);
-  print_received(false);
-  delay(100);
-  print_received(true);
-  delay(100);
+  execute_CMD(Command_Play_Previous_File);
+  smart_receive_and_print();
+
+  execute_CMD(Command_Get_Current_File_Number); // Get the current file played
+  smart_receive_and_print("PRE", Command_Get_Current_File_Number);
 }
 
+/**
+ * Toggles the mute state. On mute it reads the current volume on unmute it sets the previously read volume.
+ */
 void mute() {
   mute_state = !mute_state;
 
   if(mute_state) {
-    execute_CMD(0x43, 0, 0);  //  Get volume level
-    delay(100);
-    print_received(false);
-    delay(100);
-    print_received(false);
-    delay(100);
-    volume = receive_buffer[6];
+    execute_CMD(Command_Get_Volume_Status);  //  Get volume level
+    smart_receive_and_print("VOL", Command_Get_Volume_Status);
+    volume = receive_buffer[Data2_Index];
     
-    Serial.print("MUTE\t");
-    execute_CMD(0x06, 0, 0x00); //  Set volume level
-    delay(100);
-    print_received(false);
-    delay(100);
-    execute_CMD(0x43, 0, 0);  //  Get volume level
-    delay(100);
-    print_received(false);
-    delay(100);
-    print_received(true);
-    delay(100);
+    execute_CMD(Command_Set_Volume, 0, Volume_Preset::dB_000_Hearing_Threshold); //  Set volume level
+    smart_receive_and_print();
+
+    execute_CMD(Command_Get_Volume_Status);  //  Get volume level
+    smart_receive_and_print("MUTE", Command_Get_Volume_Status);
   }
   else {
-    Serial.print("VOL\t");
-    execute_CMD(0x06, 0, volume); //  Set previous volume level
-    delay(100);
-    print_received(false);
-    delay(100);
-    execute_CMD(0x43, 0, 0);  //  Get volume level
-    delay(100);
-    print_received(false);
-    delay(100);
-    print_received(true);
-    delay(100);
+    execute_CMD(Command_Set_Volume, 0, volume); //  Set previous volume level
+    smart_receive_and_print();
+
+    execute_CMD(Command_Get_Volume_Status);  //  Get volume level
+    smart_receive_and_print("UNMUTE", Command_Get_Volume_Status);
   }
 }
 
+/**
+ * Plays an mp3 folder file by its index.
+ * @param ab Two bytes that define file number in range 1-3000 (0x0BB8).
+ */
+void play_mp3(uint16_t ab) {
+  if ((int)ab > 3000) {
+    Serial.println("Invalid value for mp3 folder file index. 1 <= ab <= 3000.");
+    return;
+  }
+  // ab=0x1234 -> a=0x12, b=0x34
+  // for details see https://stackoverflow.com/a/70407902
+  uint8_t a = ab / 0x100 & 0xff;
+  uint8_t b = ab & 0xff;
+
+  execute_CMD(Command_Play_MP3, a, b);
+  smart_receive_and_print();
+
+  execute_CMD(Command_Get_Playback_Status); // Get playback status
+  smart_receive_and_print("MP3PLBK", Command_Get_Playback_Status);
+}
+
+/**
+ * Plays file 0001 in the mp3 folder.
+ */
 void play_in_mp3() {
-  // plays song 01 in the mp3 folder
-  execute_CMD(0x12, 0, 1);
-  delay(100);
-  print_received(false);
-  delay(100);
-  execute_CMD(0x42, 0, 0);
-  delay(100);
-  print_received(false);
-  delay(100);
-  Serial.print("MP3fol\t");
-  print_received(false);
-  delay(100);
-  execute_CMD(0x45, 0, 0); // Get playback status
-  delay(100);
-  print_received(false);
-  delay(100);
-  Serial.print("PLYBCK\t");
-  print_received(true);
-  delay(100);
+  play_mp3(1);
 }
 
-void loop_fol_two_song_one() {
-  // plays song 01 in the 02 folder
-  execute_CMD(0x17, 2, 1);
-  delay(100);
-  //Serial.print("\t");
-  print_received(false);
-  delay(100);
-  Serial.print("Loop01\t");
-  print_received(false);
-  delay(100);
-  execute_CMD(0x45, 0, 0); // Get playback status
-  delay(100);
-  print_received(false);
-  delay(100);
-  Serial.print("PLYBCK\t");
-  print_received(true);
-  delay(100);
+/**
+ * Plays file 01 in the 02 folder.
+ */
+void loop_fol_two_file_one() {
+  execute_CMD(Command_Loop_File_In_Folder, 2, 1);
+  smart_receive_and_print();
+
+  execute_CMD(Command_Get_Playback_Status); // Get playback status
+  smart_receive_and_print("2L1PBK", Command_Get_Playback_Status);
 }
 
+/**
+ * Loops current playing file.
+ */
 void loop_current() {
-  // loops current playing song
-  execute_CMD(0x19, 0, 0);
-  delay(100);
-  Serial.print("LPCRRNT\t");
-  print_received(false);
-  delay(100);
-  execute_CMD(0x45, 0, 0); // Get playback status
-  delay(100);
-  print_received(false);
-  delay(100);
-  Serial.print("PLYBCK\t");
-  print_received(true);
-  delay(100);
+  execute_CMD(Command_Toggle_Loop_Current_File, 0, Toggle_Loop_All_Or_Current_File_Second_Byte::Start);
+  smart_receive_and_print();
+
+  execute_CMD(Command_Get_Playback_Status); // Get playback status
+  smart_receive_and_print("LCRPBK", Command_Get_Playback_Status);
 }
 
+/**
+ * Stops looping the current playing file.
+ */
 void stop_loop_current() {
-  // stops looping the current playing song
-  execute_CMD(0x19, 0, 1);
-  delay(100);
-  Serial.print("STPLP\t");
-  print_received(false);
-  delay(100);
-  execute_CMD(0x45, 0, 0); // Get playback status
-  delay(100);
-  print_received(false);
-  delay(100);
-  Serial.print("PLYBCK\t");
-  print_received(true);
-  delay(100);
+  execute_CMD(Command_Toggle_Loop_Current_File, 0, Toggle_Loop_All_Or_Current_File_Second_Byte::Stop);
+  smart_receive_and_print();
+
+  execute_CMD(Command_Get_Playback_Status); // Get playback status
+  smart_receive_and_print("LCRSTP", Command_Get_Playback_Status);
 }
 
+/**
+ * Loops all files, playback one by one.
+ */
 void loop_all() {
-  // loops all songs, playback one by one
-  execute_CMD(0x11, 0, 1);
-  delay(100);
-  Serial.print("LPALL\t");
-  print_received(false);
-  delay(100);
-  execute_CMD(0x45, 0, 0); // Get playback status
-  delay(100);
-  print_received(false);
-  delay(100);
-  Serial.print("PLYBCK\t");
-  print_received(true);
-  delay(100);
+  execute_CMD(Command_Toggle_Loop_All, 0, Toggle_Loop_All_Or_Current_File_Second_Byte::Start);
+  smart_receive_and_print();
+
+  execute_CMD(Command_Get_Playback_Status); // Get playback status
+  smart_receive_and_print("LALPBK", Command_Get_Playback_Status);
 }
 
+/**
+ * Stops loop all.
+ */
 void stop_loop_all() {
-  // stops loop all
-  execute_CMD(0x11, 0, 0);
-  delay(100);
-  Serial.print("NOLPA\t");
-  print_received(false);
-  delay(100);
-  execute_CMD(0x45, 0, 0); // Get playback status
-  delay(100);
-  print_received(false);
-  delay(100);
-  Serial.print("PLYBCK\t");
-  print_received(true);
-  delay(100);
+  // Hardware bug or specification error?! Command_Toggle_Loop_All with Stop on DATA2 does not stop loop all!
+  // But Command_Stop_Play does.
+  // execute_CMD(Command_Toggle_Loop_All, 0, Toggle_Loop_All_Or_Current_File_Second_Byte::Stop);
+  execute_CMD(Command_Stop_Play);
+  smart_receive_and_print();
+
+  execute_CMD(Command_Get_Playback_Status); // Get playback status
+  smart_receive_and_print("LALSTP", Command_Get_Playback_Status);
 }
 
+/**
+ * Random plays all files, loops all, repeats files in playback.
+ */
 void random_play() {
-  // random plays all songs, loops all, repeats songs in playback
-  execute_CMD(0x18, 0, 0);
-  delay(100);
-  Serial.print("RNDM\t");
-  print_received(false);
-  delay(100);
-  execute_CMD(0x4C, 0, 0);  // Get current song played
-  delay(100);
-  print_received(false);
-  delay(100);
-  print_received(true);
-  delay(100);
+  execute_CMD(Command_Play_All_Random);
+  smart_receive_and_print();
+
+  execute_CMD(Command_Get_Current_File_Number);  // Get current file played
+  smart_receive_and_print("RANDOM", Command_Get_Current_File_Number);
 }
 
-void play_ads() {
-  // pause the playback, plays the add,  
-  // and after adds is finished playing
+/**
+ * Plays an ADVERT folder file by its index.
+ * @param ab Two bytes that define file number in range 1-3000 (0x0BB8).
+ */
+void play_advertisement(uint16_t ab) {
+  if ((int)ab > 3000) {
+    Serial.println("Invalid value for ADVERT folder file index. 1 <= ab <= 3000.");
+    return;
+  }
+  // ab=0x1234 -> a=0x12, b=0x34
+  // for details see https://stackoverflow.com/a/70407902
+  uint8_t a = ab / 0x100 & 0xff;
+  uint8_t b = ab & 0xff;
+
+  // pause the playback, plays the ad,  
+  // and after ad is finished playing
   // resumes the playback
-  execute_CMD(0x13, 0, 1);
-  delay(100);
-  Serial.print("ADD\t");
-  print_received(true);
-  delay(100);
+  execute_CMD(Command_Play_Advertisement, a, b);
+  smart_receive_and_print("ADVERT", Command_Play_Advertisement);
 }
 
+/**
+ * Plays file 0001 in the ADVERT folder.
+ */
+void play_in_advert() {
+  play_advertisement(1);
+}
+
+/**
+ * Loops all files in the folder 02.
+ */
 void loop_folder_two() {
-  // loops all songs in the folder 02
-  execute_CMD(0x17, 0, 2);
-  delay(100);
-  Serial.print("LPFLDR\t");
-  print_received(false);
-  delay(100);
-  print_received(false);
-  delay(100);
-  execute_CMD(0x4C, 0, 0);  // Get current song played
-  delay(100);
-  print_received(false);
-  delay(100);
-  print_received(true);
-  delay(100);
+  execute_CMD(Command_Loop_File_In_Folder, Toggle_Loop_All_First_Byte::All_Songs, 2);
+  smart_receive_and_print();
+
+  execute_CMD(Command_Get_Current_File_Number);  // Get current file played
+  smart_receive_and_print("LPFLD2", Command_Get_Current_File_Number);
 }
 
-void stop_all() {
-  // stop playback
-  execute_CMD(0x16, 0, 0);
-  delay(100);
-  Serial.print("STOP\t");
-  print_received(false);
-  delay(100);
-  execute_CMD(0x45, 0, 0); // Get playback status
-  delay(100);
-  print_received(false);
-  delay(100);
-  Serial.print("PLYBCK\t");
-  print_received(true);
-  delay(100);
+/**
+ * Stops playback of file or loop.
+ */
+void stop_playback() {
+  execute_CMD(Command_Stop_Play);
+  smart_receive_and_print();
+
+  execute_CMD(Command_Get_Playback_Status); // Get playback status
+  smart_receive_and_print("STOP", Command_Get_Playback_Status);
 }
 
+/**
+ * Query status of module. This will print playback status (0x42), volume, equalizer setting,
+ * playback status (0x45), files on SD card and current file played.
+ */
 void query_status() {
-  execute_CMD(0x42, 0, 0); // Get status of module
-  delay(100);
-  print_received(false);
-  delay(100);
-  Serial.print("STATUS\t");
-  print_received(true);
-  delay(100);
+  execute_CMD(Command_Get_Playback_Status_1); // Get status of module
+  smart_receive_and_print("STATUS", Command_Get_Playback_Status_1);
   
-  execute_CMD(0x43, 0, 0); // Get volume level
-  delay(100);
-  print_received(false);
-  delay(100);
-  Serial.print("VOLUME\t");
-  print_received(true);
-  delay(100);
+  execute_CMD(Command_Get_Volume_Status); // Get volume level
+  smart_receive_and_print("VOLUME", Command_Get_Volume_Status);
   
-  execute_CMD(0x44, 0, 0); // Get EQ status
-  delay(100);
-  print_received(false);
-  delay(100);
-  Serial.print("EQ\t");
-  print_received(true);
-  delay(100);
+  execute_CMD(Command_Get_Equalizer_Status); // Get EQ status
+  smart_receive_and_print("EQ", Command_Get_Equalizer_Status);
   
-  execute_CMD(0x45, 0, 0); // Get playback status
-  delay(100);
-  print_received(false);
-  delay(100);
-  Serial.print("PLYBCK\t");
-  print_received(true);
-  delay(100);
+  execute_CMD(Command_Get_Playback_Status); // Get playback status
+  smart_receive_and_print("PLYBCK", Command_Get_Playback_Status);
 
-  execute_CMD(0x46, 0, 0); // Get software version
-  delay(100);
-  print_received(false);
-  delay(100);
-  Serial.print("SFVER\t");
-  print_received(true);
-  delay(100);
+  execute_CMD(Command_Get_Total_Number_Of_Files_On_SDcard); // Get total number of files on storage device
+  smart_receive_and_print("FILES", Command_Get_Total_Number_Of_Files_On_SDcard);
 
-  execute_CMD(0x48, 0, 0); // Get total number of files on storage device
-  delay(100);
-  print_received(false);
-  delay(100);
-  Serial.print("FILES\t");
-  print_received(true);
-  delay(100);
-
-  execute_CMD(0x4C, 0, 0); // Get current song played
-  delay(100);
-  print_received(false);
-  delay(100);
-  Serial.print("CRRTRK\t");
-  print_received(true);
-  delay(100);
+  execute_CMD(Command_Get_Current_File_Number); // Get current file played
+  smart_receive_and_print("CRRTRK", Command_Get_Current_File_Number);
 }
 
 void setup() {
@@ -475,31 +464,33 @@ void setup() {
   module_init();
 }
 
-void loop() {
-  print_received(true);
-   
+void loop() {   
   while(Serial.available() > 0) {
     data = Serial.read();
     //Serial.println(data, HEX); //  for debugging
     if(data != "/n") {
       if(data == 'P') {
-        Serial.println("\nPlay the song");
-        play();
+        Serial.println("\Resume the file");
+        resume();
       }
       else if(data == 'p') {
-        Serial.println("\nPause the song");
+        Serial.println("\nPause the file");
         pause();
       }
+      else if(data == 'f') {
+        Serial.println("\nPlay first file");
+        play_first();
+      }
       else if(data == 'N') {
-        Serial.println("\nPlay next song");
+        Serial.println("\nPlay next file");
         play_next();
       }
       else if(data == 'R') {
-        Serial.println("\nPlay previous song\t");
+        Serial.println("\nPlay previous file\t");
         play_previous();
       }
       else if(data == 'm') {
-        Serial.println("\nPlay in mp3 folder song 1");
+        Serial.println("\nPlay in mp3 folder file 1");
         play_in_mp3();
       }
       else if(data == 'M') {
@@ -507,8 +498,8 @@ void loop() {
         mute();
       }
       else if(data == '1') { // number one
-        Serial.println("\nLoop song 01 in folder 02");
-        loop_fol_two_song_one();
+        Serial.println("\nLoop file 01 in folder 02");
+        loop_fol_two_file_one();
       }
       else if(data == 'C') {
         Serial.println("\nLoop one");
@@ -526,25 +517,29 @@ void loop() {
         Serial.println("\nStop loop all");
         stop_loop_all();
       }
-      else if(data == 'B') {
+      else if(data == 'r') {
         Serial.println("\nRandom play");
         random_play();
       }
       else if(data == 'a') {
-        Serial.println("\nPlay adds");
-        play_ads();
+        Serial.println("\nPlay advertisement");
+        play_in_advert();
       }
       else if(data == '2') {
-        Serial.println("\nLoop all songs in folder 2");
+        Serial.println("\nLoop all files in folder 2");
         loop_folder_two();
       }
       else if(data == 'S') {
         Serial.println("\nStop playback");
-        stop_all();
+        stop_playback();
       }
-      else if(data == 'D') {
+      else if(data == 'Q') {
         Serial.println("\nQuerry status of the module");
         query_status();
+      }
+      else if(data == 'i') {
+        Serial.println("\nInitialize module");
+        module_init();
       }
     }
   }
